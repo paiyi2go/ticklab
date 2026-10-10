@@ -4,6 +4,11 @@ A timegrapher for mechanical watches. Record your watch ticking, and ticklab mea
 its **rate** (seconds gained or lost per day), **beat error** and **amplitude**, then
 flags problems and, optionally, asks Claude to explain them in plain language.
 
+**[Try the live demo](https://paiyi2go.github.io/ticklab/)**. It runs entirely in your
+browser: adjust a simulated watch with sliders, or record or upload your own.
+
+[![The ticklab demo: sliders for a simulated watch, result tiles, a timing trace and the shape of one beat](docs/demo.jpg)](https://paiyi2go.github.io/ticklab/)
+
 ```
 $ ticklab report dial_up=du.wav crown_down=cd.wav
 dial_up
@@ -39,7 +44,12 @@ ticklab report dial_up=a.wav crown_down=b.wav      # several positions + assessm
 ticklab report dial_up=a.wav --ai --movement "ETA 2824-2"   # add Claude's diagnosis
 ticklab synth test.wav --rate 8 --beat-error 0.4   # make a synthetic watch
 uvicorn ticklab.server:app                         # web demo at http://localhost:8000
+python scripts/build_site.py                       # static build of the demo in site/
 ```
+
+The demo page has two backends. Served by `uvicorn`, it calls the Python API. As a
+static site (GitHub Pages), it loads the same Python modules into the browser with
+[Pyodide](https://pyodide.org), so no server is needed and recordings never leave the page.
 
 Recordings must be WAV, at least 5 seconds long and sampled at 16 kHz or more.
 The `--ai` flag needs an Anthropic API key in `ANTHROPIC_API_KEY`. The web server

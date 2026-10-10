@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import os
 from pathlib import Path
 
@@ -10,8 +9,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .analyze import STANDARD_BPH, AnalysisError, analyze, load_wav
-from .diagnose import Reading, assess, explain
+from . import demo
+from .analyze import STANDARD_BPH, AnalysisError
+from .diagnose import explain
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 STATIC = Path(__file__).parent / "static"
@@ -32,6 +32,15 @@ class AssessRequest(BaseModel):
     readings: list[ReadingIn]
     movement: str | None = None
     explain: bool = False
+
+
+class SimulateRequest(BaseModel):
+    bph: int = 28800
+    rate: float = 0.0
+    beat_error_ms: float = 0.0
+    amplitude: float = 280.0
+    snr_db: float = 30.0
+    lift_angle: float = 52.0
 
 
 @app.get("/")
@@ -56,19 +65,25 @@ async def analyze_upload(
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "Recording is larger than 20 MB.")
     try:
-        samples, sr = load_wav(io.BytesIO(data))
-    except Exception:
-        raise HTTPException(400, "Could not read the file as WAV audio.")
-    try:
-        return analyze(samples, sr, lift_angle=lift_angle, bph=bph).to_dict()
+        return demo.analyze_wav(data, lift_angle=lift_angle, bph=bph)
     except AnalysisError as e:
+        raise HTTPException(422, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/simulate")
+def simulate(req: SimulateRequest) -> dict:
+    try:
+        return demo.simulate(**req.model_dump())
+    except (AnalysisError, ValueError) as e:
         raise HTTPException(422, str(e))
 
 
 @app.post("/api/assess")
 def assess_readings(req: AssessRequest) -> dict:
     try:
-        result = assess([Reading(**r.model_dump()) for r in req.readings])
+        result = demo.assess_readings([r.model_dump() for r in req.readings])
     except ValueError as e:
         raise HTTPException(422, str(e))
     if req.explain:

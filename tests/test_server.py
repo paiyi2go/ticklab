@@ -57,3 +57,25 @@ def test_ai_explanation_is_off_by_default():
         {"position": "dial_up", "rate_s_per_day": 3, "beat_error_ms": 0.1, "amplitude_deg": 280},
     ]})
     assert res.status_code == 403
+
+
+def test_simulate_returns_plot_data():
+    res = client.post("/api/simulate", json={"rate": 12, "beat_error_ms": 0.8, "amplitude": 250})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["rate_s_per_day"] == pytest.approx(12, abs=0.5)
+    strip, shape = body["trace"]["strip"], body["trace"]["shape"]
+    assert len(strip["time_s"]) == len(strip["offset_ms"]) == len(strip["parity"]) == body["n_ticks"]
+    assert len(shape["t_ms"]) == len(shape["tick"]) == len(shape["tock"])
+    assert shape["unlock_ms"] < 0
+
+
+def test_simulate_rejects_out_of_range():
+    assert client.post("/api/simulate", json={"amplitude": 20}).status_code == 422
+    assert client.post("/api/simulate", json={"bph": 12345}).status_code == 422
+
+
+def test_simulate_reports_noise():
+    res = client.post("/api/simulate", json={"snr_db": 15})
+    assert res.status_code == 422
+    assert "faint" in res.json()["detail"]

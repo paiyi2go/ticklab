@@ -40,6 +40,7 @@ class Analysis:
     duration_s: float
     jitter_ms: float  # scatter of tick times around the fit
     snr_db: float
+    trace: dict | None = None  # per-tick data for plotting; only with detail=True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -114,12 +115,17 @@ def _fit_ticks(t: np.ndarray, period: float) -> tuple[float, float, np.ndarray, 
 
 
 def analyze(
-    samples: np.ndarray, sr: int, lift_angle: float = 52.0, bph: int | None = None
+    samples: np.ndarray,
+    sr: int,
+    lift_angle: float = 52.0,
+    bph: int | None = None,
+    detail: bool = False,
 ) -> Analysis:
     """Measure a watch from a mono recording.
 
     ``lift_angle`` is movement-specific (52 degrees is a common default) and only
-    affects the amplitude. Pass ``bph`` to skip beat-rate detection.
+    affects the amplitude. Pass ``bph`` to skip beat-rate detection, and
+    ``detail=True`` to include the per-tick data behind the numbers.
     """
     samples = np.asarray(samples, dtype=np.float64)
     duration = len(samples) / sr
@@ -144,9 +150,10 @@ def analyze(
 
     peaks, _ = signal.find_peaks(env, height=0.4 * peak_level, distance=int(0.7 * period_n))
     window = int(min(0.3 * period, 0.03) * sr)
+    post = int(0.008 * sr)
     drops, lifts = [], []
     for p in peaks:
-        if p < window:
+        if p < window or p + post >= len(env):
             continue
         seg = env[p - window : p + 1]
         below_half = np.nonzero(seg < 0.5 * env[p])[0]
@@ -162,19 +169,26 @@ def analyze(
         raise AnalysisError("Too few clean ticks to measure the rate.")
 
     # Timing uses the drop pulse: it is the loudest, so its edge is the most repeatable.
-    fitted_period, d, res, keep = _fit_ticks(np.array(drops), period)
+    drops = np.array(drops)
+    fitted_period, d, res, keep = _fit_ticks(drops, period)
 
     amplitude = None
+    lift_time = None
     good_lifts = np.array(lifts)[keep]
     good_lifts = good_lifts[np.isfinite(good_lifts)]
     if len(good_lifts) >= MIN_TICKS:
-        lift_time = float(np.median(good_lifts))
-        spread = float(np.median(np.abs(good_lifts - lift_time)))
-        phase = np.pi * (bph / 7200.0) * lift_time  # balance: theta = A sin(2 pi f t)
-        if spread < 0.1 * lift_time and 0 < phase < np.pi / 2:
+        median_lift = float(np.median(good_lifts))
+        spread = float(np.median(np.abs(good_lifts - median_lift)))
+        phase = np.pi * (bph / 7200.0) * median_lift  # balance: theta = A sin(2 pi f t)
+        if spread < 0.1 * median_lift and 0 < phase < np.pi / 2:
             candidate = lift_angle / (2 * np.sin(phase))
             if 90 <= candidate <= 360:
                 amplitude = float(candidate)
+                lift_time = median_lift
+
+    trace = None
+    if detail:
+        trace = _trace(env, sr, drops[keep], period, window, post, lift_time)
 
     return Analysis(
         bph=bph,
@@ -186,7 +200,42 @@ def analyze(
         duration_s=duration,
         jitter_ms=float(np.std(res[keep]) * 1e3),
         snr_db=float(snr_db),
+        trace=trace,
     )
+
+
+def _trace(env, sr, drops, period, pre, post, lift_time) -> dict:
+    """Plot data: the classic timegrapher strip, and the average shape of a tick."""
+    k = np.concatenate([[0], np.cumsum(np.rint(np.diff(drops) / period))]).astype(int)
+    # How far ahead of a perfect watch each tick is (positive = early, so a gaining watch
+    # rises), wrapped like the paper strip of a timegrapher.
+    offset = k * period - (drops - drops[0])
+    offset = (offset + period / 2) % period - period / 2
+
+    idx = np.rint(drops * sr).astype(int)
+    segments = np.stack([env[i - pre : i + post] for i in idx])
+    step = max(1, segments.shape[1] // 300)
+    n = segments.shape[1] // step * step
+    shapes = {}
+    for name, parity in (("tick", 0), ("tock", 1)):
+        mean = segments[k % 2 == parity, :n].mean(axis=0)
+        shapes[name] = mean.reshape(-1, step).max(axis=1)  # max-pool keeps the peaks
+    scale = max(shapes["tick"].max(), shapes["tock"].max())
+    t_ms = (np.arange(0, n, step) - pre) / sr * 1e3
+
+    return {
+        "strip": {
+            "time_s": np.round(drops, 4).tolist(),
+            "offset_ms": np.round(offset * 1e3, 4).tolist(),
+            "parity": (k % 2).tolist(),
+        },
+        "shape": {
+            "t_ms": np.round(t_ms, 3).tolist(),
+            "tick": np.round(shapes["tick"] / scale, 4).tolist(),
+            "tock": np.round(shapes["tock"] / scale, 4).tolist(),
+            "unlock_ms": None if lift_time is None else round(-lift_time * 1e3, 3),
+        },
+    }
 
 
 def analyze_file(path, lift_angle: float = 52.0, bph: int | None = None) -> Analysis:
