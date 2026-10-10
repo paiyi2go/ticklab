@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ticklab"
+version = "0.1.0"
+description = "Timegrapher for mechanical watches: rate, beat error and amplitude from a microphone recording, with an AI diagnosis."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "scipy>=1.11"]
+
+[project.optional-dependencies]
+ai = ["anthropic>=1.0"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+ticklab = "ticklab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ticklab = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

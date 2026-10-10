@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ticklab</title>
+<style>
+  :root { --bg:#f7f5f0; --card:#fff; --ink:#1c1b19; --muted:#6b675f; --line:#e2ded5; --accent:#8a5a1c; --warn:#a33a1f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151412; --card:#1f1d1a; --ink:#ece8df; --muted:#9a958a; --line:#33302b; --accent:#d9a55a; --warn:#e8846a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { font:600 28px/1.2 Georgia, serif; margin:0 0 4px; }
+  p.lead { color:var(--muted); margin:0 0 24px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:16px; }
+  h2 { font-size:15px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 12px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+  label { display:grid; gap:4px; font-size:13px; color:var(--muted); }
+  select, input, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  input[type=number] { width:90px; }
+  button { cursor:pointer; background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.plain { background:var(--bg); color:var(--ink); border-color:var(--line); font-weight:400; }
+  #status { margin-top:12px; color:var(--muted); min-height:1.5em; }
+  #status.error { color:var(--warn); }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { text-align:right; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { font-size:13px; color:var(--muted); font-weight:500; }
+  ul { margin:8px 0 0; padding-left:20px; }
+  li.warning { color:var(--warn); }
+  .empty { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>ticklab</h1>
+  <p class="lead">Hold your watch against the microphone in a quiet room. Measure a few positions, then assess.</p>
+
+  <section>
+    <h2>Measure</h2>
+    <div class="row">
+      <label>Position
+        <select id="position">
+          <option value="dial_up">Dial up</option><option value="dial_down">Dial down</option>
+          <option value="crown_up">Crown up</option><option value="crown_down">Crown down</option>
+          <option value="crown_left">Crown left</option><option value="crown_right">Crown right</option>
+        </select>
+      </label>
+      <label>Lift angle <input id="lift" type="number" value="52" min="30" max="70" step="0.5"></label>
+      <button id="record">Record 20 s</button>
+      <label>or upload WAV <input id="file" type="file" accept=".wav,audio/wav"></label>
+    </div>
+    <div id="status"></div>
+  </section>
+
+  <section>
+    <h2>Readings</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Position</th><th>bph</th><th>Rate s/day</th><th>Beat error ms</th><th>Amplitude</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5" class="empty">No readings yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Assessment</h2>
+    <div class="row">
+      <button id="assess" disabled>Assess watch</button>
+      <button id="clear" class="plain">Clear</button>
+    </div>
+    <div id="assessment"></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const readings = [];
+const RECORD_SECONDS = 20;
+
+function setStatus(text, isError = false) {
+  $("status").textContent = text;
+  $("status").className = isError ? "error" : "";
+}
+
+function encodeWav(chunks, sampleRate) {
+  const length = chunks.reduce((n, c) => n + c.length, 0);
+  const view = new DataView(new ArrayBuffer(44 + length * 2));
+  const text = (offset, s) => [...s].forEach((ch, i) => view.setUint8(offset + i, ch.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, 36 + length * 2, true); text(8, "WAVEfmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, length * 2, true);
+  let offset = 44;
+  for (const chunk of chunks) for (const s of chunk) {
+    view.setInt16(offset, Math.max(-1, Math.min(1, s)) * 32767, true); offset += 2;
+  }
+  return new Blob([view], { type: "audio/wav" });
+}
+
+async function record() {
+  // Phone and laptop "enhancements" smear the tick transients, so turn them all off.
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+  });
+  const ctx = new AudioContext();
+  const worklet = `registerProcessor("tap", class extends AudioWorkletProcessor {
+    process(inputs) { if (inputs[0][0]) this.port.postMessage(inputs[0][0].slice()); return true; } });`;
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: "text/javascript" })));
+  const tap = new AudioWorkletNode(ctx, "tap");
+  const chunks = [];
+  tap.port.onmessage = e => chunks.push(e.data);
+  ctx.createMediaStreamSource(stream).connect(tap);
+  for (let s = RECORD_SECONDS; s > 0; s--) {
+    setStatus(`Recording… ${s} s left`);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  stream.getTracks().forEach(t => t.stop());
+  const sampleRate = ctx.sampleRate;
+  await ctx.close();
+  return encodeWav(chunks, sampleRate);
+}
+
+async function analyse(blob) {
+  setStatus("Analysing…");
+  const position = $("position").value;
+  const form = new FormData();
+  form.append("file", blob, "recording.wav");
+  form.append("lift_angle", $("lift").value);
+  const res = await fetch("/api/analyze", { method: "POST", body: form });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.detail || "Analysis failed.");
+  const existing = readings.findIndex(r => r.position === position);
+  const reading = { position, ...body };
+  if (existing >= 0) readings[existing] = reading; else readings.push(reading);
+  render();
+  setStatus(`Measured ${body.n_ticks} ticks.`);
+}
+
+// Avoids showing "-0.0" for a rate that rounds to zero.
+const signed = v => (Math.abs(v) < 0.05 ? 0 : v).toFixed(1);
+
+function render() {
+  const rows = $("rows");
+  rows.replaceChildren();
+  for (const r of readings) {
+    const tr = rows.insertRow();
+    const cells = [r.position.replace("_", " "), r.bph, signed(r.rate_s_per_day),
+      r.beat_error_ms.toFixed(2), r.amplitude_deg ? r.amplitude_deg.toFixed(0) + "°" : "n/a"];
+    for (const c of cells) tr.insertCell().textContent = c;
+  }
+  if (!readings.length) {
+    const td = rows.insertRow().insertCell();
+    td.colSpan = 5; td.className = "empty"; td.textContent = "No readings yet.";
+  }
+  $("assess").disabled = !readings.length;
+}
+
+async function assess() {
+  const res = await fetch("/api/assess", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ readings: readings.map(({ position, rate_s_per_day, beat_error_ms, amplitude_deg }) =>
+      ({ position, rate_s_per_day, beat_error_ms, amplitude_deg })) }),
+  });
+  const body = await res.json();
+  const out = $("assessment");
+  out.replaceChildren();
+  const p = document.createElement("p");
+  p.textContent = `Average rate ${signed(body.mean_rate_s_per_day)} s/day` +
+    (body.positional_delta_s_per_day != null ? `, positional delta ${body.positional_delta_s_per_day.toFixed(1)} s/day.` : ".");
+  out.append(p);
+  const ul = document.createElement("ul");
+  for (const f of body.findings) {
+    const li = document.createElement("li");
+    li.className = f.severity; li.textContent = f.message; ul.append(li);
+  }
+  if (!body.findings.length) { const li = document.createElement("li"); li.textContent = "Nothing flagged."; ul.append(li); }
+  out.append(ul);
+}
+
+$("record").onclick = async () => {
+  $("record").disabled = true;
+  try { await analyse(await record()); } catch (e) { setStatus(e.message, true); }
+  $("record").disabled = false;
+};
+$("file").onchange = async e => {
+  if (!e.target.files[0]) return;
+  try { await analyse(e.target.files[0]); } catch (err) { setStatus(err.message, true); }
+  e.target.value = "";
+};
+$("assess").onclick = () => assess().catch(e => setStatus(e.message, true));
+$("clear").onclick = () => { readings.length = 0; render(); $("assessment").replaceChildren(); setStatus(""); };
+</script>
+</body>
+</html>
